@@ -745,3 +745,41 @@ fn copying_part_of_a_vertical_merge_leaves_no_orphan_half() {
     // One row out of the middle of the merge is not a merge at all.
     assert_eq!(merges(&d.copy_range(&pos(1, 0, 0), &pos(1, 1, 3))), vec![VMerge::None]);
 }
+
+/// A jagged row (`w:gridBefore`) starts at a grid column of its own, and `Table::grid_col` counts
+/// from there. The slice's walks have to use the same origin or the window is computed in one
+/// coordinate system and tested in another, which drops cells out of the jagged row. The copy also
+/// has to restate its own gaps, since the window is narrower than the grid they were measured in.
+#[test]
+fn copying_a_row_that_starts_part_way_across_the_grid_keeps_its_cells_and_its_gap() {
+    let mut d = Document::new();
+    let mut t = Table::new(2, 3, 300.0);
+    // Row 0 leaves the first grid column empty and holds two cells, at grid columns 1 and 2.
+    t.rows[0].props.grid_before = 1;
+    t.rows[0].cells.remove(0);
+    fill(&mut t, &[&["B", "C"], &["D", "E", "F"]]);
+    assert_eq!((t.grid.len(), t.grid_col(0, 0), t.grid_col(1, 0)), (3, 1, 0), "row 0 starts at grid column 1, row 1 at 0");
+    d.body = vec![Arc::new(Block::Table(t))];
+
+    let pos = |row: usize, cell: usize, off: usize| Pos { story: StoryRef::Body, path: Path(vec![0, row as u32, cell as u32, 0]), off };
+    let rows_of = |f: &edit::Fragment| match f.blocks.first() {
+        Some(Block::Table(t)) => t.rows.iter().map(|r| (r.props.grid_before, r.cells.len(), r.props.grid_after)).collect::<Vec<_>>(),
+        other => panic!("the copy is a table, not {other:?}"),
+    };
+    let width = |f: &edit::Fragment| match f.blocks.first() {
+        Some(Block::Table(t)) => t.grid.len(),
+        other => panic!("the copy is a table, not {other:?}"),
+    };
+
+    // Grid columns 1 and 2: the jagged row keeps both its cells and needs no gap any more, because
+    // the window starts where its cells do.
+    let right = d.copy_range(&pos(0, 0, 0), &pos(1, 2, 1));
+    assert_eq!(width(&right), 2, "two grid columns");
+    assert_eq!(rows_of(&right), vec![(0, 2, 0), (0, 2, 0)], "row 0 keeps both cells, and its gap fell outside the window");
+
+    // Grid columns 0 and 1: the jagged row has only one cell inside, and keeps the leading gap,
+    // because the window does include the empty column it skips.
+    let left = d.copy_range(&pos(1, 0, 0), &pos(0, 0, 1));
+    assert_eq!(width(&left), 2, "two grid columns");
+    assert_eq!(rows_of(&left), vec![(1, 1, 0), (0, 2, 0)], "row 0 is one cell behind a one-column gap");
+}

@@ -851,11 +851,15 @@ impl Document {
         // cell, and leaving one out would make the copy ragged. Only a cell boundary can widen the
         // window, and a pass that widens it at all gains at least one grid column, so the cells in
         // those rows bound the number of passes.
+        //
+        // Each row's walk starts at `first_grid()`, the `w:gridBefore` columns a jagged row leaves
+        // empty, because that is where `Table::grid_col` starts and the window came from it. A gap
+        // is not a cell, so an edge inside one straddles nothing.
         let cells = t.rows.get(rows.0..=rows.1).map_or(0, |rs| rs.iter().map(|r| r.cells.len()).sum::<usize>());
         for _ in 0..=cells {
             let before = (lo, hi);
             for row in t.rows.get(rows.0..=rows.1).unwrap_or_default() {
-                let mut x = 0;
+                let mut x = row.first_grid();
                 for c in &row.cells {
                     let end = x + c.span();
                     if x < hi && end > lo {
@@ -877,16 +881,23 @@ impl Document {
             .iter()
             .map(|row| {
                 let mut kept = Row { props: row.props.clone(), cells: Vec::new(), controls: row.controls.clone() };
-                let mut x = 0;
+                let (mut x, mut span) = (row.first_grid(), None::<(usize, usize)>);
                 for c in &row.cells {
                     let end = x + c.span();
                     // Whole cells only, which the widening above has already made the same set as
                     // the cells overlapping the window.
                     if x >= lo && end <= hi {
                         kept.cells.push(c.clone());
+                        span = Some((span.map_or(x, |(s, _)| s), end));
                     }
                     x = end;
                 }
+                // The copy's own gaps: a jagged row keeps the empty columns that fall inside the
+                // window, and loses the ones outside it. Without this the row would claim the
+                // original's `gridBefore` against a narrower grid and sit off to the right.
+                let (before, after) = span.map_or((0, 0), |(s, e)| (s - lo, hi - e));
+                kept.props.grid_before = before.try_into().unwrap_or(0);
+                kept.props.grid_after = after.try_into().unwrap_or(0);
                 kept
             })
             .collect();
