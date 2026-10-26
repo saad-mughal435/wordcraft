@@ -670,3 +670,78 @@ fn copying_across_a_table_row_keeps_its_cells_tab_separated() {
     assert!(f.blocks.iter().any(|b| matches!(b, Block::Table(_))), "the copy is still a table, not loose paragraphs");
     assert_eq!(f.clipboard_text(), "Col 1\tCol 2\tCol 3", "one row: tabs between the cells, and no trailing newline");
 }
+
+use crate::props::VMerge;
+
+/// Fill a table's cells row by row, left to right.
+fn fill(t: &mut Table, texts: &[&[&str]]) {
+    for (row, texts) in t.rows.iter_mut().zip(texts) {
+        for (cell, text) in row.cells.iter_mut().zip(*texts) {
+            cell.blocks = vec![para_block(Paragraph::with_text(text, CharProps::default()))];
+        }
+    }
+}
+
+/// The copied column window is in grid columns, not cell indices. A cell index is only a grid
+/// column while every cell spans one, so a merged heading row above the data used to cut the grid
+/// too narrow and drop the last cell of the rows below it, leaving a copy that is not a rectangle.
+#[test]
+fn copying_across_a_merged_cell_keeps_the_grid_and_the_cells_in_step() {
+    let mut d = Document::new();
+    let mut t = Table::new(2, 3, 300.0);
+    // Row 0 is a merged heading over the first two columns: [A (span 2), B]. Row 1 is [C, D, E].
+    t.merge_right(0, 0, 1);
+    fill(&mut t, &[&["A", "B"], &["C", "D", "E"]]);
+    assert_eq!((t.rows[0].cells.len(), t.rows[0].cells[0].span(), t.grid.len()), (2, 2, 3));
+    d.body = vec![Arc::new(Block::Table(t))];
+
+    let pos = |row: usize, cell: usize, off: usize| Pos { story: StoryRef::Body, path: Path(vec![0, row as u32, cell as u32, 0]), off };
+    let table_of = |f: &edit::Fragment| match f.blocks.first() {
+        Some(Block::Table(t)) => t.clone(),
+        other => panic!("the copy is a table, not {other:?}"),
+    };
+    let shape = |t: &Table| (t.grid.len(), t.rows.iter().map(|r| r.cells.iter().map(Cell::span).collect::<Vec<_>>()).collect::<Vec<_>>());
+
+    // The whole rectangle: A through E. The grid must be as wide as the cells kept (A spans two
+    // grid columns and B sits at the third), and row 1 must keep E.
+    let whole = table_of(&d.copy_range(&pos(0, 0, 0), &pos(1, 2, 1)));
+    assert_eq!(shape(&whole), (3, vec![vec![2, 1], vec![1, 1, 1]]), "the grid is three columns wide and no cell was dropped");
+    assert_eq!(whole.rows[1].cells.len(), 3, "E survives");
+
+    // Both ends in the heading row: still three grid columns, because B starts at the third.
+    let heading = table_of(&d.copy_range(&pos(0, 0, 0), &pos(0, 1, 1)));
+    assert_eq!(shape(&heading), (3, vec![vec![2, 1]]), "A spans two columns and B is the third");
+
+    // A narrower selection, B down to D, is widened to whole cells the way Word widens it: D sits
+    // under half of A, and half a cell cannot be copied, so A comes in and the window is the table.
+    let widened = table_of(&d.copy_range(&pos(0, 1, 0), &pos(1, 1, 1)));
+    assert_eq!(shape(&widened), (3, vec![vec![2, 1], vec![1, 1, 1]]), "the merged cell drags the window wide");
+}
+
+/// A vertical merge is `Restart` plus `Continue` cells, and the copy is a table in its own right:
+/// a merge that ran into it from above has to start at the first row kept, and one that ran out of
+/// the bottom has to end at the last. An orphan `Continue` or a `Restart` with nothing continuing
+/// it is not a merge Word can paste.
+#[test]
+fn copying_part_of_a_vertical_merge_leaves_no_orphan_half() {
+    let mut d = Document::new();
+    let mut t = Table::new(3, 2, 200.0);
+    // Column 0 merged down all three rows; column 1 holds one cell per row.
+    t.merge(0, 2, 0, 0);
+    fill(&mut t, &[&["M", "one"], &["", "two"], &["", "three"]]);
+    assert_eq!(t.rows.iter().map(|r| r.cells[0].props.vmerge).collect::<Vec<_>>(), vec![VMerge::Restart, VMerge::Continue, VMerge::Continue]);
+    d.body = vec![Arc::new(Block::Table(t))];
+
+    let pos = |row: usize, cell: usize, off: usize| Pos { story: StoryRef::Body, path: Path(vec![0, row as u32, cell as u32, 0]), off };
+    let merges = |f: &edit::Fragment| match f.blocks.first() {
+        Some(Block::Table(t)) => t.rows.iter().map(|r| r.cells[0].props.vmerge).collect::<Vec<_>>(),
+        other => panic!("the copy is a table, not {other:?}"),
+    };
+
+    // Rows 1 and 2: the merge starts at the first row kept rather than continuing from nothing.
+    assert_eq!(merges(&d.copy_range(&pos(1, 0, 0), &pos(2, 1, 5))), vec![VMerge::Restart, VMerge::Continue]);
+    // Rows 0 and 1: the merge ran on past row 1 in the original, so in a two-row copy it ends there.
+    assert_eq!(merges(&d.copy_range(&pos(0, 0, 0), &pos(1, 1, 3))), vec![VMerge::Restart, VMerge::Continue]);
+    // One row out of the middle of the merge is not a merge at all.
+    assert_eq!(merges(&d.copy_range(&pos(1, 0, 0), &pos(1, 1, 3))), vec![VMerge::None]);
+}
